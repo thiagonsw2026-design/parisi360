@@ -1051,179 +1051,162 @@ topbarInput.addEventListener('focus', () => {
 
 
 // ════════════════════════════
-//   BARCODE SCANNER — Dynamsoft via CDN (máxima compatibilidade)
+//   BARCODE SCANNER — QuaggaJS
 // ════════════════════════════
 
-let scannerStream = null;
 let scannerActive = false;
-let scannerAnimFrame = null;
 let lastScanned = null;
 let toastTimeout = null;
-
-// ── Carrega script dinamicamente ──
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-}
+let quaggaRunning = false;
 
 function openScanner() {
   document.getElementById('scannerOverlay').classList.add('open');
   scannerActive = true;
-  // Carrega ZXing via jsDelivr (funciona em qualquer browser)
-  loadScript('https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.1/umd/index.min.js')
-    .then(() => loadScript('https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js'))
-    .catch(() => {})
-    .finally(() => startScanner());
+  loadQuagga();
 }
 
 function closeScanner() {
   scannerActive = false;
   document.getElementById('scannerOverlay').classList.remove('open');
-  stopScanner();
+  stopQuagga();
 }
 
-function stopScanner() {
-  if (scannerAnimFrame) { cancelAnimationFrame(scannerAnimFrame); scannerAnimFrame = null; }
-  if (scannerStream) { scannerStream.getTracks().forEach(t => t.stop()); scannerStream = null; }
-  const video = document.getElementById('scannerVideo');
-  video.srcObject = null;
+function stopQuagga() {
+  if (quaggaRunning) {
+    try { Quagga.stop(); } catch(e) {}
+    quaggaRunning = false;
+  }
 }
 
-async function startScanner() {
-  const video = document.getElementById('scannerVideo');
-
-  // Tenta câmera primeiro
-  try {
-    scannerStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
-    });
-    video.srcObject = scannerStream;
-    await video.play();
-  } catch(e) {
-    if (e.name === 'NotAllowedError') {
-      showToast('📵 Câmera bloqueada', 'Permita o acesso à câmera');
-    } else {
-      showToast('Erro', 'Câmera não disponível');
-    }
+function loadQuagga() {
+  if (typeof Quagga !== 'undefined') {
+    startQuagga();
     return;
   }
-
-  // Tenta BarcodeDetector nativo (Chrome Android/desktop)
-  if ('BarcodeDetector' in window) {
-    try {
-      const bd = new BarcodeDetector({ formats: ['code_128','ean_13','ean_8','code_39','qr_code'] });
-      const nativeLoop = async () => {
-        if (!scannerActive) return;
-        if (video.readyState >= 2) {
-          try {
-            const results = await bd.detect(video);
-            if (results.length) { handleRaw(results[0].rawValue); return; }
-          } catch(e) {}
-        }
-        scannerAnimFrame = requestAnimationFrame(nativeLoop);
-      };
-      nativeLoop();
-      return;
-    } catch(e) {}
-  }
-
-  // Fallback: ZXing se carregado
-  if (typeof ZXingBrowser !== 'undefined' || typeof ZXing !== 'undefined') {
-    startZxing(video);
-    return;
-  }
-
-  // Fallback final: canvas frame capture manual
-  startCanvasScanner(video);
-}
-
-function startZxing(video) {
-  try {
-    const Lib = typeof ZXingBrowser !== 'undefined' ? ZXingBrowser : ZXing;
-    const reader = new Lib.BrowserMultiFormatReader();
-    reader.decodeFromVideoElement(video, (result, err) => {
-      if (!scannerActive) return;
-      if (result) handleRaw(result.getText());
-    });
-  } catch(e) {
-    startCanvasScanner(video);
-  }
-}
-
-// Canvas fallback: captura frames e envia para API de visão se disponível
-// ou usa input manual como último recurso
-function startCanvasScanner(video) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  let frameCount = 0;
-
-  const loop = async () => {
-    if (!scannerActive) return;
-    if (video.readyState >= 2) {
-      frameCount++;
-      // A cada 15 frames tenta detectar via BarcodeDetector (pode ter sido carregado depois)
-      if (frameCount % 15 === 0 && 'BarcodeDetector' in window) {
-        try {
-          const bd = new BarcodeDetector({ formats: ['code_128','ean_13','ean_8','code_39','qr_code'] });
-          const r = await bd.detect(video);
-          if (r.length) { handleRaw(r[0].rawValue); return; }
-        } catch(e) {}
-      }
-    }
-    scannerAnimFrame = requestAnimationFrame(loop);
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js';
+  s.onload = () => startQuagga();
+  s.onerror = () => {
+    // fallback CDN
+    const s2 = document.createElement('script');
+    s2.src = 'https://unpkg.com/quagga@0.12.1/dist/quagga.min.js';
+    s2.onload = () => startQuagga();
+    s2.onerror = () => showManualInput();
+    document.head.appendChild(s2);
   };
-  loop();
+  document.head.appendChild(s);
+}
 
-  // Mostra input manual após 4 segundos sem leitura
-  setTimeout(() => {
-    if (scannerActive && !lastScanned) {
-      showManualInput();
+function startQuagga() {
+  if (!scannerActive) return;
+  const video = document.getElementById('scannerVideo');
+  // Hide the default video element — Quagga manages its own
+  video.style.display = 'none';
+
+  // Create container for Quagga
+  let qContainer = document.getElementById('quaggaContainer');
+  if (!qContainer) {
+    qContainer = document.createElement('div');
+    qContainer.id = 'quaggaContainer';
+    qContainer.style.cssText = 'position:absolute;inset:0;overflow:hidden;';
+    document.getElementById('scannerOverlay').insertBefore(qContainer, video);
+  }
+  qContainer.style.display = 'block';
+  qContainer.innerHTML = '';
+
+  Quagga.init({
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: qContainer,
+      constraints: {
+        facingMode: 'environment',
+        width: { min: 640, ideal: 1280 },
+        height: { min: 480, ideal: 720 },
+      },
+    },
+    locator: {
+      patchSize: 'medium',
+      halfSample: true,
+    },
+    numOfWorkers: 2,
+    frequency: 10,
+    decoder: {
+      readers: [
+        'code_128_reader',
+        'ean_reader',
+        'ean_8_reader',
+        'code_39_reader',
+        'upc_reader',
+      ],
+    },
+    locate: true,
+  }, (err) => {
+    if (err) {
+      console.error('Quagga init error:', err);
+      if (err.name === 'NotAllowedError') {
+        showToast('📵 Permissão negada', 'Libere a câmera nas configurações');
+      } else {
+        showManualInput();
+      }
+      return;
     }
-  }, 4000);
+    quaggaRunning = true;
+    Quagga.start();
+  });
+
+  Quagga.onDetected((data) => {
+    if (!scannerActive) return;
+    const raw = data.codeResult.code;
+    if (!raw || raw === lastScanned) return;
+
+    // Confidence check — ignora leituras ruins
+    const err = data.codeResult.decodedCodes
+      .filter(c => c.error !== undefined)
+      .map(c => c.error);
+    const avgErr = err.reduce((a, b) => a + b, 0) / (err.length || 1);
+    if (avgErr > 0.25) return;
+
+    lastScanned = raw;
+    handleRaw(raw);
+    setTimeout(() => { lastScanned = null; }, 2500);
+  });
 }
 
 function showManualInput() {
   const hint = document.querySelector('.scanner-hint');
   hint.innerHTML = `
-    <p style="margin-bottom:10px;color:rgba(201,165,90,0.7)">Scanner não disponível neste browser.<br>Digite o código manualmente:</p>
+    <p style="margin-bottom:10px;color:rgba(201,165,90,0.7);font-size:13px">
+      Scanner indisponível neste browser.<br>Digite o código manualmente:
+    </p>
     <div style="display:flex;gap:8px;justify-content:center;padding:0 20px">
       <input id="manualCodeInput" type="text" placeholder="Ex: QQ.RH.L.46"
-        style="flex:1;background:rgba(20,18,14,0.95);border:1px solid rgba(201,165,90,0.4);border-radius:8px;
-               padding:10px 14px;color:#f0e8d8;font-family:Montserrat,sans-serif;font-size:14px;
-               outline:none;caret-color:#c9a55a;max-width:220px"
-        autocomplete="off" autocorrect="off" spellcheck="false">
+        style="flex:1;background:rgba(20,18,14,0.95);border:1px solid rgba(201,165,90,0.4);
+               border-radius:8px;padding:10px 14px;color:#f0e8d8;
+               font-family:Montserrat,sans-serif;font-size:15px;outline:none;
+               caret-color:#c9a55a;max-width:240px;-webkit-appearance:none"
+        autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false">
       <button onclick="submitManual()"
-        style="background:rgba(201,165,90,0.18);border:1px solid rgba(201,165,90,0.4);border-radius:8px;
-               padding:10px 16px;color:#c9a55a;font-family:Montserrat,sans-serif;font-size:13px;
-               font-weight:600;cursor:pointer;letter-spacing:0.05em">
-        OK
-      </button>
+        style="background:rgba(201,165,90,0.18);border:1px solid rgba(201,165,90,0.4);
+               border-radius:8px;padding:10px 18px;color:#c9a55a;
+               font-family:Montserrat,sans-serif;font-size:13px;
+               font-weight:600;cursor:pointer">OK</button>
     </div>`;
   const inp = document.getElementById('manualCodeInput');
   if (inp) {
-    inp.focus();
+    setTimeout(() => inp.focus(), 100);
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') submitManual(); });
   }
 }
 
 function submitManual() {
   const inp = document.getElementById('manualCodeInput');
-  if (!inp) return;
-  const val = inp.value.trim().toUpperCase();
-  if (val) handleRaw(val);
+  if (!inp || !inp.value.trim()) return;
+  handleRaw(inp.value.trim());
 }
 
 function handleRaw(raw) {
   const normalized = raw.trim().toUpperCase().replace(/\s+/g, '');
-  if (normalized === lastScanned) return;
-  lastScanned = normalized;
 
   let product = index.find(p => p.code.toUpperCase() === normalized);
   if (!product) {
@@ -1239,6 +1222,10 @@ function handleRaw(raw) {
     showToast(product.code, hasInfo ? product.description : '📍 ' + product.location);
     setTimeout(() => {
       closeScanner();
+      stopQuagga();
+      const qc = document.getElementById('quaggaContainer');
+      if (qc) qc.style.display = 'none';
+      document.getElementById('scannerVideo').style.display = '';
       expandedCode = product.code;
       if (resultsScreen.classList.contains('visible')) {
         topbarInput.value = product.code;
@@ -1246,10 +1233,9 @@ function handleRaw(raw) {
       } else {
         goResults(product.code);
       }
-    }, 1100);
+    }, 1000);
   } else {
     showToast('Não encontrado', normalized.length > 22 ? normalized.slice(0,22)+'…' : normalized);
-    setTimeout(() => { lastScanned = null; }, 2000);
   }
 }
 
